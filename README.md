@@ -3,21 +3,23 @@
 A Delphi component for getting notifications about file system changes.
 
 ## Introduction
-Whilst there are many delphi components for detetecting changes to file system folders there suffer from serious limitaions:
+Whilst there are many Delphi components for detecting changes to file system folders they suffer from serious limitations:
 - typically they only allow you to monitor a single folder
 - they do not support the monitoring of specific files
-- they rely on the FindFirstChangeNotification API which gives no information about what has changed, requiring an inefficent search.
+- they rely on the FindFirstChangeNotification API which gives no information about what has changed, requiring an inefficient search.
 
 This component was created to address these limitations and provide additional features.
 
 ## Features
 - Easy to use, but also suitable for heavy duty monitoring
+- Single unit with no external dependencies
 - Allows monitoring folders and/or specific files
 - Uses the ReadDirectoryChangesW API which provides information about what exactly was changed
 - A single instance of the component can handle the monitoring of many folders and/or files 
 - Uses an I/O completion port for efficient handling of large numbers of requests
-- A single thread handles all requests
+- A single thread handles all requests.
 - A different notification handler can be specified for each request
+- You can have multiple handlers for each folder or file
 - When you monitor folders you can specify whether you want to also monitor subfolders
 
 ## Installation
