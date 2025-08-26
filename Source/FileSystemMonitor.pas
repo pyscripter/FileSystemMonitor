@@ -9,14 +9,6 @@ unit FileSystemMonitor;
 
 interface
 
-uses
-  Winapi.Windows,
-  System.SysUtils,
-  System.Classes,
-  System.Generics.Collections,
-  System.SyncObjs,
-  System.IOUtils;
-
 type
   TFileChangeType = (fcAdded, fcRemoved, fcModified, fcRenamedOld, fcRenamedNew);
 
@@ -33,8 +25,34 @@ type
     DefaultNotifyFlags = [nfFileName, nfDirName, nfSize, nfLastWrite, nfCreation];
 
 type
-  TFileSystemMonitor = class;
 
+  IFileSystemMonitor = interface
+  ['{83753FF0-14C9-4F3D-B5F1-7C0C3A468A6E}']
+    function GetBufferSize: Integer;
+    procedure SetBufferSize(const BufferSize: Integer);
+    function AddDirectory(const Directory: string; WatchSubtree: Boolean;
+      OnChange: TMonitorChangeHandler; NotifyFlags: TNotifyFlags = DefaultNotifyFlags): Boolean;
+    function AddFile(const FilePath: string; OnChange: TMonitorChangeHandler;
+      NotifyFlags: TNotifyFlags = DefaultNotifyFlags): Boolean;
+    function RemoveDirectory(const Directory: string; OnChange: TMonitorChangeHandler): Boolean;
+    function RemoveFile(const FilePath: string; OnChange: TMonitorChangeHandler): Boolean;
+    function IsMonitoring: Boolean;
+    property BufferSize: Integer read GetBufferSize write SetBufferSize;
+  end;
+
+  function CreateFileSystemMonitor: IFileSystemMonitor;
+
+implementation
+
+uses
+  Winapi.Windows,
+  System.SysUtils,
+  System.Classes,
+  System.Generics.Collections,
+  System.SyncObjs,
+  System.IOUtils;
+
+type
   TFileNotifyInformation = record
     NextEntryOffset: DWORD;
     Action: DWORD;
@@ -64,12 +82,13 @@ type
     class procedure FreeMonitorInfo(MonitorInfo: PMonitorInfo); static;
   end;
 
-  TFileSystemMonitor = class(TComponent)
+  TFileSystemMonitor = class(TInterfacedObject, IFileSystemMonitor)
   private
     FCompletionPort: THandle;
     FMonitorList: TList<PMonitorInfo>;
     FWorkerThread: TThread;
     FSync: TCriticalSection;
+    class var FBufferSize: Integer; // default 65536
     procedure HandleChange(MonitorInfo: PMonitorInfo; NumBytes: DWORD);
     procedure WorkerThreadMethod;
     function NormalizePath(const Path: string): string;
@@ -80,10 +99,9 @@ type
     function StartDirectoryMonitoring(MonitorInfo: PMonitorInfo): Boolean;
     procedure Start;
     procedure Stop;
-  public
-    class var BufferSize: Integer; // default 65536
-    constructor Create(AOwner: TComponent); override;
-    destructor Destroy; override;
+    // IFileSystemMonitor implementation
+    function GetBufferSize: Integer;
+    procedure SetBufferSize(const BufferSize: Integer);
     function AddDirectory(const Directory: string; WatchSubtree: Boolean;
       OnChange: TMonitorChangeHandler; NotifyFlags: TNotifyFlags = DefaultNotifyFlags): Boolean;
     function AddFile(const FilePath: string; OnChange: TMonitorChangeHandler;
@@ -91,9 +109,10 @@ type
     function RemoveDirectory(const Directory: string; OnChange: TMonitorChangeHandler): Boolean;
     function RemoveFile(const FilePath: string; OnChange: TMonitorChangeHandler): Boolean;
     function IsMonitoring: Boolean;
+  public
+    constructor Create;
+    destructor Destroy; override;
   end;
-
-implementation
 
 { TDirectoryHandlerInfo }
 
@@ -119,10 +138,10 @@ end;
 
 { TFileSystemMonitor }
 
-constructor TFileSystemMonitor.Create(AOwner: TComponent);
+constructor TFileSystemMonitor.Create;
 begin
-  inherited Create(AOwner);
-  BufferSize := 65536;
+  inherited Create;
+  FBufferSize := 65536;
   FMonitorList := TList<PMonitorInfo>.Create;
   FSync := TCriticalSection.Create;
 
@@ -130,7 +149,6 @@ begin
   FCompletionPort := CreateIoCompletionPort(INVALID_HANDLE_VALUE, 0, 0, 0);
   if FCompletionPort = 0 then
     raise EOSError.Create('Failed to create I/O completion port.');
-  Start;
 end;
 
 destructor TFileSystemMonitor.Destroy;
@@ -139,6 +157,11 @@ begin
   FreeAndNil(FMonitorList);
   FreeAndNil(FSync);
   inherited;
+end;
+
+function TFileSystemMonitor.GetBufferSize: Integer;
+begin
+  Result := FBufferSize;
 end;
 
 function TFileSystemMonitor.NormalizePath(const Path: string): string;
@@ -255,6 +278,10 @@ begin
         raise EOSError.Create('Failed to start directory monitoring.');
 
       FMonitorList.Add(MonitorInfo);
+
+      if not IsMonitoring then
+        Start;
+
       Result := True;
     except
       TMonitorInfo.FreeMonitorInfo(MonitorInfo);
@@ -267,6 +294,8 @@ end;
 
 function TFileSystemMonitor.StartDirectoryMonitoring(MonitorInfo: PMonitorInfo): Boolean;
 begin
+  ZeroMemory(@MonitorInfo.Overlapped, SizeOf(TOverlapped));
+
   Result := ReadDirectoryChangesW(
     MonitorInfo.DirectoryHandle,
     @MonitorInfo.Buffer[0],
@@ -390,34 +419,35 @@ begin
         FSync.Leave;
       end;
     end
-    else
+    else if GetLastError = WAIT_TIMEOUT then
     begin
-      if GetLastError = WAIT_TIMEOUT then
-      begin
-        // If a monitored directory gets deleted/renamed we get no notification.
-        // So periodically we need to check whether the monitored directories
-        // still exist.
-        DirectoriesToDelete := [];
-        FSync.Enter;
-        try
-          for MonitorEntry in FMonitorList do
-          begin
-            if not TDirectory.Exists(MonitorEntry.Directory) then
-              DirectoriesToDelete := DirectoriesToDelete + [MonitorEntry];
-          end;
-
-          for MonitorInfo in DirectoriesToDelete do
-          begin
-            FMonitorList.Remove(MonitorInfo);
-            TMonitorInfo.FreeMonitorInfo(MonitorInfo);
-          end;
-        finally
-          FSync.Leave;
+      // If a monitored directory gets deleted/renamed we get no notification.
+      // So periodically we need to check whether the monitored directories
+      // still exist.
+      DirectoriesToDelete := [];
+      FSync.Enter;
+      try
+        for MonitorEntry in FMonitorList do
+        begin
+          if not TDirectory.Exists(MonitorEntry.Directory) then
+            DirectoriesToDelete := DirectoriesToDelete + [MonitorEntry];
         end;
-        Continue;
+
+        for MonitorInfo in DirectoriesToDelete do
+        begin
+          FMonitorList.Remove(MonitorInfo);
+          TMonitorInfo.FreeMonitorInfo(MonitorInfo);
+        end;
+      finally
+        FSync.Leave;
       end;
     end;
   end;
+end;
+
+procedure TFileSystemMonitor.SetBufferSize(const BufferSize: Integer);
+begin
+  FBufferSize := BufferSize;
 end;
 
 procedure TFileSystemMonitor.Start;
@@ -570,11 +600,10 @@ end;
 class function TMonitorInfo.NewMonitorInfo: PMonitorInfo;
 begin
   New(Result);
-  ZeroMemory(@Result.Overlapped, SizeOf(TOverlapped));
   Result.DirectoryHandlers := TList<TDirectoryHandlerInfo>.Create;
   Result.FileHandlers := TObjectDictionary<string,
         TList<TMonitorChangeHandler>>.Create([doOwnsValues]);
-  SetLength(Result.Buffer, TFileSystemMonitor.BufferSize);
+  SetLength(Result.Buffer, TFileSystemMonitor.FBufferSize);
 end;
 
 function TMonitorInfo.WatchSubtree: Boolean;
@@ -601,5 +630,11 @@ begin
     Dispose(MonitorInfo);
   end;
 end;
+
+function CreateFileSystemMonitor: IFileSystemMonitor;
+begin
+  Result := TFileSystemMonitor.Create;
+end;
+
 
 end.

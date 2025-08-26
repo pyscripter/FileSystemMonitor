@@ -1,6 +1,6 @@
 # FileSystemMonitor
 
-A Delphi component for getting notifications about file system changes.
+A Delphi library for getting notifications about file system changes.
 
 ## Introduction
 Whilst there are many Delphi components for detecting changes to file system folders they suffer from serious limitations:
@@ -8,7 +8,7 @@ Whilst there are many Delphi components for detecting changes to file system fol
 - they do not support the monitoring of specific files
 - they rely on the FindFirstChangeNotification API which gives no information about what has changed, requiring an inefficient search.
 
-This component was created to address these limitations and provide additional features.
+This library was created to address these limitations and provide additional features.
 
 ## Features
 - Easy to use, but also suitable for heavy duty monitoring
@@ -30,8 +30,8 @@ You do not need to install the library. Just download or clone this repo and add
 ```pascal
 procedure TForm1.FormCreate(Sender: TObject);
 begin
-  // Create the component
-  FFileSystemMonitor := TFileSystemMonitor.Create(Self);
+  // Create IFileSystemMonitor
+  FFileSystemMonitor := CreateFileSystemMonitor;
   // Monitor a directory
   FFileSystemMonitor.AddDirectory(TPath.GetTempPath, False, HandleChange);
   // Also monitor a specific file

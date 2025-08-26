@@ -14,7 +14,7 @@ type
     procedure FormCreate(Sender: TObject);
   private
     { Private declarations }
-    FFileSystemMonitor: TFileSystemMonitor;
+    FFileSystemMonitor: IFileSystemMonitor;
   public
     { Public declarations }
     procedure HandleChange(Sender: TObject; const Path: string; ChangeType:
@@ -34,8 +34,8 @@ uses
 
 procedure TForm1.FormCreate(Sender: TObject);
 begin
-  // Create the component
-  FFileSystemMonitor := TFileSystemMonitor.Create(Self);
+  // Create the IFileSystemMonitor
+  FFileSystemMonitor := CreateFileSystemMonitor;
   // Monitor a directory
   FFileSystemMonitor.AddDirectory(TPath.GetTempPath, False, HandleChange);
   // Also monitor a specific file  Change the path to a file of your choice
