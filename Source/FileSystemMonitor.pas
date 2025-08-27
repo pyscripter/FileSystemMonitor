@@ -152,9 +152,22 @@ begin
 end;
 
 destructor TFileSystemMonitor.Destroy;
+var
+  MonitorInfo: PMonitorInfo;
 begin
   Stop;
+
+  for MonitorInfo in FMonitorList do
+    TMonitorInfo.FreeMonitorInfo(MonitorInfo);
+
   FreeAndNil(FMonitorList);
+
+  if FCompletionPort <> 0 then
+  begin
+    CloseHandle(FCompletionPort);
+    FCompletionPort := 0;
+  end;
+
   FreeAndNil(FSync);
   inherited;
 end;
@@ -467,31 +480,16 @@ begin
 end;
 
 procedure TFileSystemMonitor.Stop;
-var
-  MonitorInfo: PMonitorInfo;
 begin
   FSync.Enter;
   try
-    if Assigned(FWorkerThread) then
-    begin
+    if IsMonitoring then
       PostQueuedCompletionStatus(FCompletionPort, 0, 0, nil);
-    end;
-
-    for MonitorInfo in FMonitorList do
-      TMonitorInfo.FreeMonitorInfo(MonitorInfo);
-
-    FreeAndNil(FMonitorList);
-
-    if FCompletionPort <> 0 then
-    begin
-      CloseHandle(FCompletionPort);
-      FCompletionPort := 0;
-    end;
   finally
     FSync.Leave;
   end;
 
-  FreeAndNil(FWorkerThread);
+  FreeAndNil(FWorkerThread); // Waits for termination
 end;
 
 function TFileSystemMonitor.RemoveDirectory(const Directory: string; OnChange:
