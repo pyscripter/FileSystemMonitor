@@ -324,7 +324,7 @@ end;
 procedure TFileSystemMonitor.HandleChange(MonitorInfo: PMonitorInfo; NumBytes: DWORD);
 
   procedure LaunchHandlers(const FullPath: string; ChangeType: TFileChangeType);
-  // The anonymous mehtod is cantained in a function, so that we capture values
+  // The anonymous mehtod is contained in a function, so that we capture values
   // and not variables which may change by the time the method is executed
   begin
     TThread.Queue(FWorkerThread,
