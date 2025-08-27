@@ -34,7 +34,7 @@ uses
 
 procedure TForm1.FormCreate(Sender: TObject);
 begin
-  // Create the IFileSystemMonitor
+  // Create the IFileSystemMonitor interface
   FFileSystemMonitor := CreateFileSystemMonitor;
   // Monitor a directory
   FFileSystemMonitor.AddDirectory(TPath.GetTempPath, False, HandleChange);

@@ -76,7 +76,7 @@ type
     Buffer: TBytes;
     NotifyFilter: DWORD;
     DirectoryHandlers: TList<TDirectoryHandlerInfo>;
-    FileHandlers: TObjectDictionary<string, TList<TMonitorChangeHandler>>;
+    FileHandlers: TDictionary<string, TArray<TMonitorChangeHandler>>;
     function WatchSubtree: Boolean;
     class function NewMonitorInfo: PMonitorInfo; static;
     class procedure FreeMonitorInfo(MonitorInfo: PMonitorInfo); static;
@@ -91,6 +91,7 @@ type
     class var FBufferSize: Integer; // default 65536
     procedure HandleChange(MonitorInfo: PMonitorInfo; NumBytes: DWORD);
     procedure WorkerThreadMethod;
+    procedure MonitoredDirectoryRemoved(MonitorInfo: PMonitorInfo);
     function NormalizePath(const Path: string): string;
     function AddDirectoryMonitor(const Directory: string; WatchSubtree: Boolean;
         NotifyFlags: TNotifyFlags; const FilePath: string; OnChange:
@@ -216,7 +217,7 @@ var
   MonitorInfo: PMonitorInfo;
   DirectoryHandle: THandle;
   NormalizedDir, NormalizedFile: string;
-  HandlerList: TList<TMonitorChangeHandler>;
+  HandlerList: TArray<TMonitorChangeHandler>;
 begin
   FSync.Enter;
   try
@@ -243,12 +244,10 @@ begin
         else
         begin
           NormalizedFile := NormalizePath(FilePath);
-          if not MonitorInfo.FileHandlers.TryGetValue(NormalizedFile, HandlerList) then
-          begin
-            HandlerList := TList<TMonitorChangeHandler>.Create;
-            MonitorInfo.FileHandlers.Add(NormalizedFile, HandlerList);
-          end;
-          HandlerList.Add(OnChange);
+          if MonitorInfo.FileHandlers.TryGetValue(NormalizedFile, HandlerList) then
+            MonitorInfo.FileHandlers[NormalizedFile] := HandlerList + [OnChange]
+          else
+            MonitorInfo.FileHandlers.Add(NormalizedFile, [OnChange]);
         end;
         Exit(True);
       end;
@@ -279,9 +278,7 @@ begin
       else
       begin
         NormalizedFile := NormalizePath(FilePath);
-        HandlerList := TList<TMonitorChangeHandler>.Create;
-        HandlerList.Add(OnChange);
-        MonitorInfo.FileHandlers.Add(NormalizedFile, HandlerList);
+        MonitorInfo.FileHandlers.Add(NormalizedFile, [OnChange]);
       end;
 
       if (CreateIoCompletionPort(DirectoryHandle, FCompletionPort,
@@ -323,31 +320,37 @@ end;
 
 procedure TFileSystemMonitor.HandleChange(MonitorInfo: PMonitorInfo; NumBytes: DWORD);
 
-  procedure LaunchHandlers(const FullPath: string; ChangeType: TFileChangeType);
+  procedure LaunchHandlers(const Path: string; ChangeType: TFileChangeType);
   // The anonymous mehtod is contained in a function, so that we capture values
   // and not variables which may change by the time the method is executed
   begin
     TThread.Queue(FWorkerThread,
       procedure
       var
+        FullPath: string;
         IsSubdirectoryChange: Boolean;
         HandlerInfo: TDirectoryHandlerInfo;
         Handler: TMonitorChangeHandler;
-        FileHandlerList: TList<TMonitorChangeHandler>;
+        FileHandlerList: TArray<TMonitorChangeHandler>;
       begin
-        IsSubdirectoryChange := not SameText(MonitorInfo.Directory,
-          TPath.GetDirectoryName(FullPath));
+        FSync.Enter;
+        try
+          // Make sure MonitorInfo is valid
+          if FMonitorList.IndexOf(MonitorInfo) < 0 then Exit;
 
-        for HandlerInfo in MonitorInfo.DirectoryHandlers do
-        begin
-          if HandlerInfo.WatchSubtree or not IsSubdirectoryChange then
-            HandlerInfo.Handler(Self, FullPath, ChangeType);
-        end;
+          FullPath := TPath.Combine(MonitorInfo.Directory, Path);
+          IsSubdirectoryChange := not SameText(MonitorInfo.Directory,
+            TPath.GetDirectoryName(FullPath));
 
-        if MonitorInfo.FileHandlers.TryGetValue(FullPath, FileHandlerList) then
-        begin
-          for Handler in FileHandlerList do
-            Handler(Self, FullPath, ChangeType);
+          for HandlerInfo in MonitorInfo.DirectoryHandlers do
+            if HandlerInfo.WatchSubtree or not IsSubdirectoryChange then
+              HandlerInfo.Handler(Self, FullPath, ChangeType);
+
+          if MonitorInfo.FileHandlers.TryGetValue(FullPath, FileHandlerList) then
+            for Handler in FileHandlerList do
+              Handler(Self, FullPath, ChangeType);
+        finally
+          FSync.Leave;
         end;
       end);
   end;
@@ -355,7 +358,7 @@ procedure TFileSystemMonitor.HandleChange(MonitorInfo: PMonitorInfo; NumBytes: D
 var
   NotifyInfo: PFileNotifyInformation;
   Offset: Longint;
-  FileName, FullPath: string;
+  Path: string;
   ChangeType: TFileChangeType;
 begin
   if NumBytes = 0 then
@@ -364,8 +367,7 @@ begin
   NotifyInfo := PFileNotifyInformation(@MonitorInfo.Buffer[0]);
   repeat
     Offset := NotifyInfo^.NextEntryOffset;
-    SetString(FileName, NotifyInfo^.FileName, NotifyInfo^.FileNameLength div SizeOf(Char));
-    FullPath := TPath.Combine(MonitorInfo.Directory, FileName);
+    SetString(Path, NotifyInfo^.FileName, NotifyInfo^.FileNameLength div SizeOf(Char));
 
     FSync.Enter;
     try
@@ -379,7 +381,7 @@ begin
         ChangeType := fcModified;  // to keep the compiler happy
       end;
 
-      LaunchHandlers(FullPath, ChangeType);
+      LaunchHandlers(Path, ChangeType);
 
     finally
       FSync.Leave;
@@ -415,7 +417,7 @@ begin
       NumBytes,
       CompletionKey,
       Overlapped,
-      10000 // 10-second timeout
+      5000 // 5-second timeout
     );
 
     if Success then
@@ -448,6 +450,9 @@ begin
 
         for MonitorInfo in DirectoriesToDelete do
         begin
+          // Send remove notifications
+          MonitoredDirectoryRemoved(MonitorInfo);
+          // Stop monitoring this directory
           FMonitorList.Remove(MonitorInfo);
           TMonitorInfo.FreeMonitorInfo(MonitorInfo);
         end;
@@ -543,7 +548,7 @@ function TFileSystemMonitor.RemoveFile(const FilePath: string; OnChange:
 var
   MonitorInfo: PMonitorInfo;
   NormalizedFile, Directory: string;
-  HandlerList: TList<TMonitorChangeHandler>;
+  HandlerList: TArray<TMonitorChangeHandler>;
   HandlerIndex: Integer;
 begin
   FSync.Enter;
@@ -558,15 +563,15 @@ begin
       begin
         if MonitorInfo.FileHandlers.TryGetValue(NormalizedFile, HandlerList) then
         begin
-          HandlerIndex := HandlerList.IndexOf(OnChange);
+          HandlerIndex := TArray.IndexOf<TMonitorChangeHandler>(HandlerList, OnChange);
           if HandlerIndex >= 0 then
           begin
             Result := True;
-            HandlerList.Delete(HandlerIndex);
-            if HandlerList.Count = 0 then
+            Delete(HandlerList, HandlerIndex, 1);
+            if Length(HandlerList) = 0 then
               MonitorInfo.FileHandlers.Remove(NormalizedFile);
 
-            if Result and (MonitorInfo.DirectoryHandlers.Count = 0) and
+            if (MonitorInfo.DirectoryHandlers.Count = 0) and
               (MonitorInfo.FileHandlers.Count = 0) then
             begin
               TMonitorInfo.FreeMonitorInfo(MonitorInfo);
@@ -593,14 +598,54 @@ begin
   end;
 end;
 
+procedure TFileSystemMonitor.MonitoredDirectoryRemoved(
+  MonitorInfo: PMonitorInfo);
+// Called when a monitored directory was deleted/renamed
+// Notifies all handlers about the removal
+// We need to be carefull because MonitorInfo will be destroyed
+// before the anonymous method gets executed
+var
+  DirectoryHandlers: TArray<TDirectoryHandlerInfo>;
+  FileHandlers: TArray<TPair<string, TArray<TMonitorChangeHandler>>>;
+begin
+  DirectoryHandlers := MonitorInfo.DirectoryHandlers.ToArray;
+  FileHandlers := MonitorInfo.FileHandlers.ToArray;
+
+  TThread.Queue(FWorkerThread,
+    procedure
+    var
+      FileName: string;
+      HandlerInfo: TDirectoryHandlerInfo;
+      Handler: TMonitorChangeHandler;
+      Pair: TPair<string, TArray<TMonitorChangeHandler>>;
+      FileHandlerList: TArray<TMonitorChangeHandler>;
+    begin
+      FSync.Enter;
+      try
+        for HandlerInfo in DirectoryHandlers do
+          HandlerInfo.Handler(Self, MonitorInfo.Directory, fcRemoved);
+
+        for Pair in FileHandlers do
+        begin
+          FileName := Pair.Key;
+          FileHandlerList := Pair.Value;
+          for Handler in FileHandlerList do
+            Handler(Self, FileName, fcRemoved);
+        end;
+      finally
+        FSync.Leave;
+      end;
+    end);
+end;
+
 { TMonitorInfo }
 
 class function TMonitorInfo.NewMonitorInfo: PMonitorInfo;
 begin
   New(Result);
   Result.DirectoryHandlers := TList<TDirectoryHandlerInfo>.Create;
-  Result.FileHandlers := TObjectDictionary<string,
-        TList<TMonitorChangeHandler>>.Create([doOwnsValues]);
+  Result.FileHandlers := TDictionary<string,
+        TArray<TMonitorChangeHandler>>.Create;
   SetLength(Result.Buffer, TFileSystemMonitor.FBufferSize);
 end;
 
