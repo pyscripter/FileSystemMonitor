@@ -249,6 +249,14 @@ begin
           else
             MonitorInfo.FileHandlers.Add(NormalizedFile, [OnChange]);
         end;
+        if NotifyFlagsToDWORD(NotifyFlags) <> MonitorInfo.NotifyFilter then
+        begin
+          MonitorInfo.NotifyFilter := MonitorInfo.NotifyFilter or
+            NotifyFlagsToDWORD(NotifyFlags);
+          CancelIoEx(MonitorInfo.DirectoryHandle, @MonitorInfo.Overlapped);
+          StartDirectoryMonitoring(MonitorInfo);
+        end;
+
         Exit(True);
       end;
     end;
